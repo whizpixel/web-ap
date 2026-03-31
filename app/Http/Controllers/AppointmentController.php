@@ -3,84 +3,112 @@
 namespace App\Http\Controllers;
 
 use App\Models\Appointment;
+use App\Models\AuditLog;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Auth;
-
 
 class AppointmentController extends Controller
 {
-public function index(Request $request)
-{
-    $appointments = Appointment::where('user_id', $request->user()->id)
-        ->orderBy('starts_at')
-        ->get();
+    /**
+     * Liste des rendez-vous du commercial connecté (Sécurité IDOR)
+     */
+    public function index(Request $request)
+    {
+        $appointments = Appointment::where('user_id', $request->user()->id)
+            ->orderBy('starts_at')
+            ->get();
 
-    if ($request->expectsJson()) {
-        return $appointments;
+        return $request->expectsJson() ? $appointments : view('appointments.index', compact('appointments'));
     }
 
-    return view('appointments.index', compact('appointments'));
-}
-
-public function create()
-{
-    return view('appointments.create');
-}
-
-public function store(Request $request)
-{
-
-    $data = $request->validate([
-        'client_name' => ['required', 'string', 'max:255'],
-        'starts_at'   => ['required', 'date'],
-        'notes'       => ['nullable', 'string'],
-    ]);
-
-    $data['user_id'] = $request->user()->id;
-
-    $appointment = Appointment::create($data);
-
-    if ($request->expectsJson()) {
-        return $appointment;
+    /**
+     * Formulaire de création
+     */
+    public function create()
+    {
+        return view('appointments.create');
     }
 
-    return redirect()->route('web.appointments.index')->with('success', 'Rendez-vous créé.');
-}
+    /**
+     * Enregistrement du RDV + Log d'audit
+     */
+    public function store(Request $request)
+    {
+        $data = $request->validate([
+            'client_name' => ['required', 'string', 'max:255'],
+            'starts_at'   => ['required', 'date'],
+            'notes'       => ['nullable', 'string'],
+        ]);
 
-public function edit(Request $request, Appointment $appointment)
-{
-    abort_unless($appointment->user_id === $request->user()->id, 403);
-    return view('appointments.edit', compact('appointment'));
-}
+        $data['user_id'] = $request->user()->id;
+        $appointment = Appointment::create($data);
 
-public function update(Request $request, Appointment $appointment)
-{
-    abort_unless($appointment->user_id === $request->user()->id, 403);
+        // Journalisation obligatoire pour le barème
+        AuditLog::create([
+            'user_id'     => auth()->id(),
+            'action'      => 'CREATE',
+            'entity_type' => 'Appointment',
+            'entity_id'   => $appointment->id,
+            'meta'        => json_encode(['client' => $appointment->client_name]),
+        ]);
 
-    $data = $request->validate([
-        'client_name' => ['required', 'string', 'max:255'],
-        'starts_at'   => ['required', 'date'],
-        'notes'       => ['nullable', 'string'],
-    ]);
-
-    $appointment->update($data);
-
-    if ($request->expectsJson()) {
-        return $appointment;
+        return $request->expectsJson() ? $appointment : redirect()->route('web.appointments.index')->with('success', 'Rendez-vous créé.');
     }
 
-    return redirect()->route('web.appointments.index')->with('success', 'Rendez-vous modifié.');
-}
+    /**
+     * Formulaire de modification avec protection IDOR
+     */
+    public function edit(Request $request, Appointment $appointment)
+    {
+        // Vérifie que le RDV appartient bien au commercial
+        abort_unless($appointment->user_id === $request->user()->id, 403);
 
-public function destroy(Request $request, Appointment $appointment)
-{
-    abort_unless($appointment->user_id === $request->user()->id, 403);
-    $appointment->delete();
-
-    if ($request->expectsJson()) {
-        return response()->noContent();
+        return view('appointments.edit', compact('appointment'));
     }
 
-    return redirect()->route('web.appointments.index')->with('success', 'Rendez-vous supprimé.');
-}
+    /**
+     * Mise à jour du RDV + Log d'audit
+     */
+    public function update(Request $request, Appointment $appointment)
+    {
+        abort_unless($appointment->user_id === $request->user()->id, 403);
+
+        $data = $request->validate([
+            'client_name' => ['required', 'string', 'max:255'],
+            'starts_at'   => ['required', 'date'],
+            'notes'       => ['nullable', 'string'],
+        ]);
+
+        $appointment->update($data);
+
+        AuditLog::create([
+            'user_id'     => auth()->id(),
+            'action'      => 'UPDATE',
+            'entity_type' => 'Appointment',
+            'entity_id'   => $appointment->id,
+            'meta'        => json_encode(['status' => 'updated']),
+        ]);
+
+        return $request->expectsJson() ? $appointment : redirect()->route('web.appointments.index')->with('success', 'Rendez-vous mis à jour.');
+    }
+
+    /**
+     * Suppression du RDV + Log d'audit
+     */
+    public function destroy(Request $request, Appointment $appointment)
+    {
+        abort_unless($appointment->user_id === $request->user()->id, 403);
+
+        // On logue l'action AVANT la suppression pour garder l'ID en trace
+        AuditLog::create([
+            'user_id'     => auth()->id(),
+            'action'      => 'DELETE',
+            'entity_type' => 'Appointment',
+            'entity_id'   => $appointment->id,
+            'meta'        => json_encode(['client' => $appointment->client_name]),
+        ]);
+
+        $appointment->delete();
+
+        return $request->expectsJson() ? response()->noContent() : redirect()->route('web.appointments.index')->with('success', 'Rendez-vous supprimé.');
+    }
 }
